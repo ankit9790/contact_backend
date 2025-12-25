@@ -7,24 +7,37 @@ class APIFunctionality {
     this.page = 1;
   }
 
-  // 🔍 SEARCH
+  /* =====================
+     🔍 SEARCH (Postgres)
+  ===================== */
   search() {
     if (this.queryStr.keyword) {
-      this.baseQuery += " AND (name LIKE ? OR email LIKE ?)";
+      const index = this.values.length + 1;
+
+      this.baseQuery += ` AND (name ILIKE $${index} OR email ILIKE $${
+        index + 1
+      })`;
+
       const keyword = `%${this.queryStr.keyword}%`;
       this.values.push(keyword, keyword);
     }
     return this;
   }
 
-  // 🎯 FILTER (future safe)
+  /* =====================
+     🎯 FILTER (future)
+  ===================== */
   filter() {
     return this;
   }
 
-  // 🔃 SORT (❗ FIX IS HERE)
+  /* =====================
+     🔃 SORT (SQL SAFE)
+  ===================== */
   sort() {
-    if (this.queryStr.sort) {
+    const allowedFields = ["name", "email", "created_at"];
+
+    if (this.queryStr.sort && allowedFields.includes(this.queryStr.sort)) {
       const order =
         this.queryStr.order && this.queryStr.order.toUpperCase() === "DESC"
           ? "DESC"
@@ -35,19 +48,26 @@ class APIFunctionality {
     return this;
   }
 
-  // 📄 PAGINATION
+  /* =====================
+     📄 PAGINATION
+  ===================== */
   pagination(resultPerPage) {
     this.limit = resultPerPage;
     this.page = Number(this.queryStr.page) || 1;
     return this;
   }
 
-  // 🧱 BUILD FINAL QUERY
+  /* =====================
+     🧱 BUILD FINAL QUERY
+  ===================== */
   build() {
     const offset = this.limit * (this.page - 1);
 
+    const limitIndex = this.values.length + 1;
+    const offsetIndex = this.values.length + 2;
+
     return {
-      dataQuery: `${this.baseQuery} LIMIT ? OFFSET ?`,
+      dataQuery: `${this.baseQuery} LIMIT $${limitIndex} OFFSET $${offsetIndex}`,
       countQuery: `SELECT COUNT(*) as total FROM (${this.baseQuery}) as countTable`,
       values: this.values,
       paginationValues: [...this.values, this.limit, offset],

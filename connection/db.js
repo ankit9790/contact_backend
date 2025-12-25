@@ -1,21 +1,25 @@
-import mysql from "mysql2";
+import dotenv from "dotenv";
+dotenv.config(); // ✅ MUST be first
 
-export const db = mysql.createPool({
-  host: process.env.MYSQLHOST,
-  user: process.env.MYSQLUSER,
-  password: process.env.MYSQLPASSWORD,
-  database: process.env.MYSQLDATABASE,
-  port: process.env.MYSQLPORT,
-  waitForConnections: true,
-  connectionLimit: 10,
-  queueLimit: 0,
+import pkg from "pg";
+const { Pool } = pkg;
+
+// ✅ Safety check
+if (!process.env.DATABASE_URL) {
+  throw new Error("DATABASE_URL is missing");
+}
+
+// ✅ Detect Neon (needs SSL)
+const isNeon = process.env.DATABASE_URL.includes("neon.tech");
+
+export const db = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: isNeon ? { rejectUnauthorized: false } : false,
 });
 
-db.getConnection((err, connection) => {
-  if (err) {
-    console.error("DB Connection Failed ❌", err.message);
-  } else {
-    console.log("MySQL Connected ✅");
-    connection.release();
-  }
-});
+// ✅ Test connection
+db.connect()
+  .then(() => console.log("PostgreSQL Connected ✅"))
+  .catch((err) =>
+    console.error("PostgreSQL Connection Failed ❌", err.message)
+  );

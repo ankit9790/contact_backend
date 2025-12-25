@@ -1,15 +1,6 @@
 import { db } from "../connection/db.js";
 import APIFunctionality from "../utils/APIFunctionality.js";
-
-// helper to use async/await with mysql2
-const queryAsync = (sql, values) => {
-  return new Promise((resolve, reject) => {
-    db.query(sql, values, (err, result) => {
-      if (err) reject(err);
-      else resolve(result);
-    });
-  });
-};
+import XLSX from "xlsx";
 
 /* ===========================
    CREATE CONTACT
@@ -18,9 +9,9 @@ export const createContact = async (req, res) => {
   try {
     const { name, email, phone } = req.body;
 
-    const sql = "INSERT INTO contacts (name, email, phone) VALUES (?, ?, ?)";
+    const sql = "INSERT INTO contacts (name, email, phone) VALUES ($1, $2, $3)";
 
-    await queryAsync(sql, [name, email, phone]);
+    await db.query(sql, [name, email, phone]);
 
     res.status(201).json({
       success: true,
@@ -36,7 +27,6 @@ export const createContact = async (req, res) => {
 
 /* ===========================
    GET CONTACTS
-   (SEARCH + FILTER + PAGINATION)
 =========================== */
 export const getContacts = async (req, res) => {
   try {
@@ -44,30 +34,28 @@ export const getContacts = async (req, res) => {
 
     const apiFeature = new APIFunctionality(baseQuery, req.query)
       .search()
-      .sort() // ✅ REQUIRED
+      .sort()
       .pagination(5)
       .build();
 
     // get data
-    const contacts = await queryAsync(
+    const contactsResult = await db.query(
       apiFeature.dataQuery,
       apiFeature.paginationValues
     );
 
     // get total count
-    const countResult = await queryAsync(
+    const countResult = await db.query(
       apiFeature.countQuery,
       apiFeature.values
     );
 
-    const total = countResult[0].total;
-
     res.status(200).json({
       success: true,
-      total,
+      total: Number(countResult.rows[0].total),
       page: Number(req.query.page) || 1,
       limit: 5,
-      data: contacts,
+      data: contactsResult.rows,
     });
   } catch (error) {
     res.status(500).json({
@@ -85,29 +73,28 @@ export const updateContact = async (req, res) => {
     const { name, email, phone } = req.body;
     const { id } = req.params;
 
-    // 🔎 check if email or phone already exists for another user
+    // 🔎 check duplicate email or phone
     const checkSql = `
-      SELECT id FROM contacts 
-      WHERE (email = ? OR phone = ?) AND id != ?
+      SELECT id FROM contacts
+      WHERE (email = $1 OR phone = $2) AND id != $3
     `;
 
-    const existing = await queryAsync(checkSql, [email, phone, id]);
+    const existing = await db.query(checkSql, [email, phone, id]);
 
-    if (existing.length > 0) {
+    if (existing.rows.length > 0) {
       return res.status(400).json({
         success: false,
         message: "Email or phone already exists",
       });
     }
 
-    // ✅ safe update
     const updateSql = `
-      UPDATE contacts 
-      SET name = ?, email = ?, phone = ?, updated_at = NOW()
-      WHERE id = ?
+      UPDATE contacts
+      SET name = $1, email = $2, phone = $3, updated_at = NOW()
+      WHERE id = $4
     `;
 
-    await queryAsync(updateSql, [name, email, phone, id]);
+    await db.query(updateSql, [name, email, phone, id]);
 
     res.json({
       success: true,
@@ -126,11 +113,11 @@ export const updateContact = async (req, res) => {
 =========================== */
 export const deleteContact = async (req, res) => {
   try {
-    const sql = "DELETE FROM contacts WHERE id=?";
+    const sql = "DELETE FROM contacts WHERE id = $1 RETURNING id";
 
-    const result = await queryAsync(sql, [req.params.id]);
+    const result = await db.query(sql, [req.params.id]);
 
-    if (result.affectedRows === 0) {
+    if (result.rows.length === 0) {
       return res.status(404).json({
         success: false,
         message: "Contact not found",
@@ -149,10 +136,9 @@ export const deleteContact = async (req, res) => {
   }
 };
 
-import XLSX from "xlsx";
-
-/* ================= EXCEL UPLOAD ================= */
-/* ================= EXCEL UPLOAD WITH ERROR REPORT ================= */
+/* ===========================
+   EXCEL UPLOAD WITH ERROR REPORT
+=========================== */
 export const uploadContacts = async (req, res) => {
   try {
     if (!req.file) {
@@ -196,38 +182,24 @@ export const uploadContacts = async (req, res) => {
         return;
       }
 
-      validRows.push([row.name, row.email, row.phone]);
+      validRows.push(row);
     });
 
-    // insert valid rows
-    if (validRows.length > 0) {
-      const sql = "INSERT IGNORE INTO contacts (name, email, phone) VALUES ?";
-      await queryAsync(sql, [validRows]);
-    }
-
-    // generate error Excel if errors exist
-    if (errorRows.length > 0) {
-      const errorSheet = XLSX.utils.json_to_sheet(errorRows);
-      const errorWorkbook = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(errorWorkbook, errorSheet, "Errors");
-
-      const errorBuffer = XLSX.write(errorWorkbook, {
-        bookType: "xlsx",
-        type: "buffer",
-      });
-
-      return res.status(200).json({
-        success: true,
-        inserted: validRows.length,
-        errors: errorRows,
-        errorReportBase64: errorBuffer.toString("base64"),
-      });
+    for (const r of validRows) {
+      await db.query(
+        `
+        INSERT INTO contacts (name, email, phone)
+        VALUES ($1, $2, $3)
+        ON CONFLICT (email) DO NOTHING
+        `,
+        [r.name, r.email, r.phone]
+      );
     }
 
     res.status(200).json({
       success: true,
       inserted: validRows.length,
-      errors: [],
+      errors: errorRows,
     });
   } catch (error) {
     res.status(500).json({
@@ -237,32 +209,29 @@ export const uploadContacts = async (req, res) => {
   }
 };
 
-/* ================= EXPORT CONTACTS TO EXCEL ================= */
+/* ===========================
+   EXPORT CONTACTS TO EXCEL
+=========================== */
 export const exportContacts = async (req, res) => {
   try {
-    // fetch all contacts (you can add filter/search later)
-    const sql = "SELECT name, email, phone FROM contacts";
-    const contacts = await queryAsync(sql);
+    const result = await db.query("SELECT name, email, phone FROM contacts");
 
-    if (contacts.length === 0) {
+    if (result.rows.length === 0) {
       return res.status(404).json({
         success: false,
         message: "No contacts found",
       });
     }
 
-    // convert JSON to worksheet
-    const worksheet = XLSX.utils.json_to_sheet(contacts);
+    const worksheet = XLSX.utils.json_to_sheet(result.rows);
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, worksheet, "Contacts");
 
-    // create buffer
     const excelBuffer = XLSX.write(workbook, {
       bookType: "xlsx",
       type: "buffer",
     });
 
-    // set headers for download
     res.setHeader("Content-Disposition", "attachment; filename=contacts.xlsx");
     res.setHeader(
       "Content-Type",
@@ -278,7 +247,9 @@ export const exportContacts = async (req, res) => {
   }
 };
 
-/* ================= BATCH DELETE ================= */
+/* ===========================
+   BATCH DELETE
+=========================== */
 export const batchDeleteContacts = async (req, res) => {
   try {
     const { ids } = req.body;
@@ -290,12 +261,17 @@ export const batchDeleteContacts = async (req, res) => {
       });
     }
 
-    const sql = "DELETE FROM contacts WHERE id IN (?)";
-    const result = await queryAsync(sql, [ids]);
+    const sql = `
+      DELETE FROM contacts
+      WHERE id = ANY($1::int[])
+      RETURNING id
+    `;
+
+    const result = await db.query(sql, [ids]);
 
     res.status(200).json({
       success: true,
-      deletedCount: result.affectedRows,
+      deletedCount: result.rows.length,
     });
   } catch (error) {
     res.status(500).json({
